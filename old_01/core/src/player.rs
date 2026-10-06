@@ -76,8 +76,6 @@ pub struct Status {
     pub bitrate_kbps: u32,
     pub codec: String,
     pub segments: u64,
-    /// Ghi chú về chất lượng âm thanh (ví dụ HE-AAC chỉ phát phần lõi).
-    pub note: Option<String>,
 }
 
 impl Status {
@@ -91,7 +89,6 @@ impl Status {
             bitrate_kbps: 0,
             codec: String::new(),
             segments: 0,
-            note: None,
         }
     }
 }
@@ -207,32 +204,22 @@ impl Drop for Player {
 
 // ---------------------------------------------------------------- đường ống xử lý
 
-const HE_NOTE: &str =
-    "Luồng HE-AAC: đang phát phần lõi, âm thanh có thể kém sáng hơn bản gốc (thiếu dải cao).";
-
-struct Pipe<'a> {
+struct Pipe {
     parser: Fmp4Parser,
     dec: Option<AacDec>,
     pcm: Vec<f32>,
     out: Output,
-    sh: &'a Shared,
-    /// Manifest khai báo HE-AAC (kể cả khi ASC báo hiệu ngầm).
-    he_hint: bool,
 }
 
-impl Pipe<'_> {
+impl Pipe {
     /// Nạp byte vào; trả `true` nếu đã đẩy PCM mới ra hàng đợi phát.
     fn feed(&mut self, data: &[u8]) -> Result<bool> {
-        let Pipe { parser, dec, pcm, sh, he_hint, .. } = self;
+        let Pipe { parser, dec, pcm, .. } = self;
         parser.feed(data, &mut |ev| {
             match ev {
                 Event::Init(info) => {
                     if dec.as_ref().map_or(true, |d| d.asc != info.asc) {
-                        let d = AacDec::new(info, *he_hint)?;
-                        if d.core_only {
-                            sh.update(|s| s.note = Some(HE_NOTE.into()));
-                        }
-                        *dec = Some(d);
+                        *dec = Some(AacDec::new(info)?);
                     }
                 }
                 Event::Sample { data, .. } => {
@@ -316,12 +303,9 @@ fn run(sh: &Shared, cfg: &PlayerConfig) -> Result<()> {
         Some(p) => SinkKind::Wav(p.clone()),
         None => SinkKind::Device,
     };
-    let mut out = Output::new(cfg.latency.tuning(), kind, sh.stop.clone())?;
-    // Nội dung đã kết thúc (VOD / file liền): phát đủ, không đuổi live.
-    out.set_live(mpd.live && !matches!(rep.source, SegSource::Single(_)));
+    let out = Output::new(cfg.latency.tuning(), kind, sh.stop.clone())?;
     *sh.meter.lock().unwrap() = Some(out.meter.clone());
-    let he_hint = rep.codecs.starts_with("mp4a.40.5") || rep.codecs.starts_with("mp4a.40.29");
-    let mut pipe = Pipe { parser: Fmp4Parser::new(), dec: None, pcm: Vec::new(), out, sh, he_hint };
+    let mut pipe = Pipe { parser: Fmp4Parser::new(), dec: None, pcm: Vec::new(), out };
 
     if let Some(u) = &rep.init_url {
         let (b, _) = http.get(u, 1 << 20)?;
@@ -352,7 +336,7 @@ fn run(sh: &Shared, cfg: &PlayerConfig) -> Result<()> {
 fn segment_loop(
     sh: &Shared,
     http: &Http,
-    pipe: &mut Pipe<'_>,
+    pipe: &mut Pipe,
     src: &Source,
     mpd: &mut Mpd,
     clock: &mut f64,
@@ -366,8 +350,6 @@ fn segment_loop(
     let mut miss_since: Option<Instant> = None;
     let mut played_any = false;
     let mut playing = false;
-    // Manifest đã chuyển sang `static` (hoặc biến mất): phiên live đã kết thúc → hết đoạn thì dừng.
-    let mut source_ended = false;
     let mut not_before = Instant::now();
 
     while !sh.stopped() {
@@ -420,7 +402,7 @@ fn segment_loop(
                     last_ok = Instant::now();
                     continue;
                 }
-                if not_found && (!live || source_ended) {
+                if not_found && !live {
                     if played_any {
                         return Ok(());
                     }
@@ -445,7 +427,7 @@ fn segment_loop(
                 let stale = Duration::from_secs_f64((seg_dur * 2.0).max(3.0));
                 if (!not_found || missing_for > stale) && last_refresh.elapsed() > Duration::from_secs(2) {
                     last_refresh = Instant::now();
-                    source_ended |= refresh(http, pipe, src, mpd, clock, init_url, &mut cur);
+                    refresh(http, pipe, src, mpd, clock, init_url, &mut cur);
                 }
                 if last_ok.elapsed() > Duration::from_secs(45) {
                     bail!("Mất tín hiệu hơn 45 giây — có thể phiên live đã kết thúc.");
@@ -458,15 +440,15 @@ fn segment_loop(
 
 fn refresh(
     http: &Http,
-    pipe: &mut Pipe<'_>,
+    pipe: &mut Pipe,
     src: &Source,
     mpd: &mut Mpd,
     clock: &mut f64,
     init_url: &mut Option<String>,
     cur: &mut Cursor,
-) -> bool {
+) {
     if src.url.is_none() {
-        return false; // manifest nhúng sẵn trong trang: không làm mới được
+        return; // manifest nhúng sẵn trong trang: không làm mới được
     }
     match load(http, src) {
         Ok((new, off)) => {
@@ -481,23 +463,14 @@ fn refresh(
                 }
                 *init_url = new.audio.init_url.clone();
             }
-            let ended = !new.live;
-            if ended {
-                log::info!("manifest đã chuyển sang static: phiên live kết thúc");
-            }
             *mpd = new;
             let edge = mpd.live_edge(epoch() + *clock);
             if edge.number > cur.number {
                 log::info!("nhảy tới live edge #{}", edge.number);
                 *cur = edge;
             }
-            ended
         }
-        Err(e) => {
-            log::warn!("không làm mới được manifest: {e:#}");
-            // manifest không còn nữa (404/410) cộng với đoạn cũng hết → coi như đã kết thúc
-            matches!(status_of(&e), Some(404) | Some(410))
-        }
+        Err(e) => log::warn!("không làm mới được manifest: {e:#}"),
     }
 }
 

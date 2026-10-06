@@ -94,9 +94,6 @@ pub struct Output {
     stereo: Vec<f32>,
     resampled: Vec<f32>,
     closing: Arc<AtomicBool>,
-    stop: Arc<AtomicBool>,
-    /// false = nội dung đã kết thúc (VOD): không có live edge để đuổi theo → chặn nguồn lại thay vì bỏ dữ liệu.
-    live: bool,
     // `Stream` không Send → Output phải sống trọn đời trong luồng player.
     _stream: Option<cpal::Stream>,
     sim: Option<JoinHandle<()>>,
@@ -107,7 +104,6 @@ impl Output {
         let meter = Arc::new(Meter::default());
         let skip = Arc::new(AtomicUsize::new(0));
         let closing = Arc::new(AtomicBool::new(false));
-        let stop_out = stop.clone();
 
         match kind {
             SinkKind::Device => {
@@ -122,7 +118,7 @@ impl Output {
                 let cb = Callback { cons, skip: skip.clone(), meter: meter.clone(), stop, in_underrun: false };
                 let stream = build_stream(&device, &cfg, fmt, cb)?;
                 stream.play()?;
-                Ok(Self::assemble(prod, skip, meter, rate, tuning, closing, stop_out, Some(stream), None))
+                Ok(Self::assemble(prod, skip, meter, rate, tuning, closing, Some(stream), None))
             }
             SinkKind::Wav(path) => {
                 let rate = 48_000u32;
@@ -130,7 +126,7 @@ impl Output {
                 let cb = Callback { cons, skip: skip.clone(), meter: meter.clone(), stop, in_underrun: false };
                 let wav = Wav::create(&path, rate)?;
                 let sim = spawn_wav(wav, rate, cb, closing.clone());
-                Ok(Self::assemble(prod, skip, meter, rate, tuning, closing, stop_out, None, Some(sim)))
+                Ok(Self::assemble(prod, skip, meter, rate, tuning, closing, None, Some(sim)))
             }
         }
     }
@@ -143,7 +139,6 @@ impl Output {
         dev_rate: u32,
         tuning: Tuning,
         closing: Arc<AtomicBool>,
-        stop: Arc<AtomicBool>,
         stream: Option<cpal::Stream>,
         sim: Option<JoinHandle<()>>,
     ) -> Self {
@@ -161,16 +156,9 @@ impl Output {
             stereo: Vec::new(),
             resampled: Vec::new(),
             closing,
-            stop,
-            live: true,
             _stream: stream,
             sim,
         }
-    }
-
-    /// `false` cho nội dung đã kết thúc (VOD): phát đủ, không cắt nhảy, nguồn bị chặn khi đệm đầy.
-    pub fn set_live(&mut self, live: bool) {
-        self.live = live;
     }
 
     /// Đẩy PCM float xen kẽ kênh (từ bộ giải mã) vào hàng đợi phát.
@@ -201,17 +189,6 @@ impl Output {
         let ms = |frames: usize| frames as f64 * 1000.0 / dev;
         let margin_ms = self.tuning.margin_ms as f64;
         let slack_ms = self.tuning.slack_ms as f64;
-
-        if !self.live {
-            // VOD: tốc độ 1,0, không đuổi live; chỉ dựng đệm lúc khởi động rồi chặn nguồn theo nhịp phát.
-            self.resampled.clear();
-            self.rs.process(&self.stereo, src_rate as f64 / dev, &mut self.resampled);
-            if ms(self.prod.occupied_len() / 2) < 8.0 {
-                self.push_silence((margin_ms * dev / 1000.0) as usize);
-            }
-            self.push_blocking();
-            return;
-        }
 
         // 2) đầu phiên / sau underrun: dựng lại đệm chống giật bằng khoảng lặng
         let mut fill = self.prod.occupied_len() / 2;
@@ -271,25 +248,6 @@ impl Output {
         let n = self.prod.push_slice(slice);
         if n < slice.len() {
             log::warn!("vòng đệm đầy, bỏ {} mẫu", slice.len() - n);
-        }
-        self.meter.started.store(true, Relaxed);
-    }
-
-    /// Đẩy `self.resampled` vào vòng đệm, đợi khi đệm đã chứa quá 1,5 s (backpressure cho VOD).
-    fn push_blocking(&mut self) {
-        let cap = self.dev_rate as usize * 3; // 1,5 s × 2 kênh = mẫu
-        let mut off = 0;
-        while off < self.resampled.len() && !self.stop.load(Relaxed) {
-            if self.prod.occupied_len() > cap {
-                std::thread::sleep(Duration::from_millis(10));
-                continue;
-            }
-            let end = (off + 4096).min(self.resampled.len());
-            let n = self.prod.push_slice(&self.resampled[off..end]);
-            off += n;
-            if n == 0 {
-                std::thread::sleep(Duration::from_millis(10));
-            }
         }
         self.meter.started.store(true, Relaxed);
     }
@@ -500,31 +458,6 @@ mod tests {
             .map(|i| (out[2 * i] - (i as f32 / 48_000.0 * 440.0 * std::f32::consts::TAU).sin() * 0.5).abs())
             .fold(0.0f32, f32::max);
         assert!(err < 0.01, "max err = {err}");
-    }
-
-    /// Hồi quy: nội dung VOD tải nhanh hơn thời gian thực KHÔNG được bị cắt bỏ như khi đuổi live.
-    #[test]
-    fn vod_is_played_in_full_with_backpressure() {
-        let path = std::env::temp_dir().join(format!("fbaudio-vod-{}.wav", std::process::id()));
-        let stop = Arc::new(AtomicBool::new(false));
-        let mut out = Output::new(
-            Tuning { margin_ms: 120, slack_ms: 250 },
-            SinkKind::Wav(path.clone()),
-            stop.clone(),
-        )
-        .unwrap();
-        out.set_live(false);
-        let t0 = Instant::now();
-        for _ in 0..4 {
-            out.push(&sine(48_000, 48_000.0, 440.0), 48_000, 2); // 4 × 1 s dồn dập
-        }
-        out.drain(&stop);
-        drop(out);
-        let bytes = std::fs::metadata(&path).unwrap().len();
-        let _ = std::fs::remove_file(&path);
-        let secs = (bytes - 44) as f64 / (48_000.0 * 4.0);
-        assert!(secs >= 4.0, "chỉ phát được {secs:.2} s trong 4 s nội dung");
-        assert!(t0.elapsed().as_secs_f64() >= 3.9, "nguồn không bị chặn nhịp: {:?}", t0.elapsed());
     }
 
     #[test]

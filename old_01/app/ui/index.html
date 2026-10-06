@@ -137,9 +137,6 @@
   .stats b { display: block; font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .stats span { font-size: 13px; color: var(--muted); }
 
-  .note { margin: 0; padding-left: 10px; border-left: 3px solid var(--lamp); font-size: 13px; color: var(--text); }
-  .note:empty { display: none; }
-
   .hint { margin: 0; font-size: 13px; color: var(--muted); }
   .hint:empty { display: none; }
 
@@ -200,7 +197,6 @@
     <div><b id="kbps">–</b><span>Âm thanh</span></div>
   </div>
 
-  <p class="note" id="note"></p>
   <p class="hint" id="hint"></p>
 </main>
 
@@ -211,7 +207,7 @@
   const el = {
     app: $('main'), url: $('#url'), paste: $('#paste'), play: $('#play'), level: $('#level'),
     state: $('#state'), sub: $('#sub'), modeHint: $('#modeHint'),
-    buf: $('#buf'), under: $('#under'), kbps: $('#kbps'), hint: $('#hint'), note: $('#note'),
+    buf: $('#buf'), under: $('#under'), kbps: $('#kbps'), hint: $('#hint'),
     modes: [...document.querySelectorAll('[data-mode]')],
   };
   const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
@@ -281,7 +277,6 @@
       el.level.style.strokeDashoffset = '';
     }
     el.hint.textContent = s === 'error' ? HINT_ERROR : defaultHint;
-    el.note.textContent = s === 'playing' && st.note ? st.note : '';
     el.buf.textContent = s === 'playing' ? `${st.buffer_ms} ms` : '–';
     el.under.textContent = String(st.underruns || 0);
     el.kbps.textContent = st.bitrate_kbps ? `${st.bitrate_kbps} kbps` : '–';

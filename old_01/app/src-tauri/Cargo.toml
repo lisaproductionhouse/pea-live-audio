@@ -9,11 +9,6 @@ edition = "2021"
 name = "fbaudio_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
-[features]
-# Giải mã HE-AAC đầy đủ (SBR + PS) bằng FDK-AAC; cần trình biên dịch C++.
-# Dùng:  cargo tauri build --features sbr
-sbr = ["fbaudio-core/sbr"]
-
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
