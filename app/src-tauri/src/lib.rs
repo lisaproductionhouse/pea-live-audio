@@ -2,21 +2,45 @@
 //! Toàn bộ xử lý âm thanh chạy trong luồng Rust riêng, KHÔNG phụ thuộc WebView:
 //! tắt màn hình / WebView bị tạm dừng thì âm thanh vẫn phát bình thường.
 
-use fbaudio_core::{LatencyMode, Player, PlayerConfig, Status};
+use fbaudio_core::{LatencyMode, Player, PlayerConfig, ResolverConfig, Status, YtDlpRemote};
+use serde::Deserialize;
 use std::sync::Mutex;
 
 static PLAYER: Mutex<Option<Player>> = Mutex::new(None);
 
+/// Tuỳ chọn lấy link do giao diện gửi lên (mục "Nâng cao").
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ResolverArgs {
+    /// Máy chủ yt-dlp (scripts/ytdlp_helper.py), ví dụ http://127.0.0.1:8787 — dùng cho Android.
+    endpoint: Option<String>,
+    token: Option<String>,
+    /// Đường dẫn yt-dlp nếu không nằm trong PATH (Windows/Linux/macOS).
+    ytdlp_path: Option<String>,
+    /// Tham số thêm cho yt-dlp, ví dụ `--cookies-from-browser firefox` (video cần đăng nhập).
+    ytdlp_args: Option<String>,
+}
+
 #[tauri::command]
-fn start(url: String, mode: String) {
+fn start(url: String, mode: String, resolver: Option<ResolverArgs>) {
     let mut guard = PLAYER.lock().unwrap();
     if let Some(old) = guard.take() {
         old.stop();
+    }
+    // Mặc định: yt-dlp (tự tìm trên máy) → bộ cào tích hợp. Có địa chỉ máy chủ thì hỏi máy chủ trước.
+    let mut rc = ResolverConfig::default();
+    if let Some(r) = resolver {
+        rc.remote = YtDlpRemote::new(r.endpoint.as_deref().unwrap_or(""), r.token.as_deref());
+        rc.ytdlp.path = r.ytdlp_path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).map(Into::into);
+        if let Some(a) = r.ytdlp_args {
+            rc.ytdlp.args.extend(fbaudio_core::split_args(&a));
+        }
     }
     *guard = Some(Player::start(PlayerConfig {
         url,
         latency: LatencyMode::parse(&mode),
         wav: None,
+        resolver: rc,
     }));
 }
 

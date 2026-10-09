@@ -115,6 +115,7 @@
     display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden;
   }
   main[data-state="error"] .say p, .say p.warn { color: var(--alert); }
+  main[data-state="error"] .say p { white-space: pre-line; text-align: left; -webkit-line-clamp: 12; max-width: 40ch; }
 
   .latency label { display: block; margin: 0 2px 8px; font-size: 14px; color: var(--muted); }
   .seg {
@@ -139,6 +140,17 @@
 
   .note { margin: 0; padding-left: 10px; border-left: 3px solid var(--lamp); font-size: 13px; color: var(--text); }
   .note:empty { display: none; }
+
+  .adv { border-top: 1px solid var(--line); padding-top: 4px; }
+  .adv summary { padding: 12px 0; font-size: 14px; color: var(--muted); cursor: pointer; }
+  .adv p { margin: 0 0 12px; font-size: 13px; color: var(--muted); }
+  .adv label { display: block; margin: 12px 2px 6px; font-size: 13px; color: var(--muted); }
+  .adv input {
+    width: 100%; height: 46px; padding: 0 14px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--surface); color: var(--text); font: inherit; font-size: 15px;
+    -webkit-user-select: text; user-select: text;
+  }
+  .adv input::placeholder { color: var(--muted); opacity: .7; }
 
   .hint { margin: 0; font-size: 13px; color: var(--muted); }
   .hint:empty { display: none; }
@@ -202,6 +214,26 @@
 
   <p class="note" id="note"></p>
   <p class="hint" id="hint"></p>
+
+  <details class="adv" id="adv">
+    <summary>Nâng cao: lấy link bằng yt-dlp</summary>
+    <p>Facebook hay đổi cấu trúc trang nên lấy link bằng yt-dlp ổn định hơn. Windows: cài yt-dlp
+       (<b>winget install yt-dlp.yt-dlp</b>), app tự tìm thấy. Android không chạy được yt-dlp: hãy chạy
+       “máy chủ yt-dlp” (xem README) rồi nhập địa chỉ vào đây.</p>
+    <label for="srv">Địa chỉ máy chủ yt-dlp</label>
+    <input id="srv" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"
+           placeholder="http://127.0.0.1:8787">
+    <label for="tok">Mã truy cập (nếu có)</label>
+    <input id="tok" type="password" autocomplete="off" placeholder="để trống nếu không đặt">
+    <div id="pathRow">
+      <label for="ytp">Đường dẫn yt-dlp (nếu không nằm trong PATH)</label>
+      <input id="ytp" type="text" autocomplete="off" autocapitalize="off" spellcheck="false"
+             placeholder="C:\Tools\yt-dlp.exe">
+      <label for="yta">Tham số thêm cho yt-dlp (video cần đăng nhập)</label>
+      <input id="yta" type="text" autocomplete="off" autocapitalize="off" spellcheck="false"
+             placeholder="--cookies-from-browser firefox">
+    </div>
+  </details>
 </main>
 
 <script>
@@ -212,6 +244,7 @@
     app: $('main'), url: $('#url'), paste: $('#paste'), play: $('#play'), level: $('#level'),
     state: $('#state'), sub: $('#sub'), modeHint: $('#modeHint'),
     buf: $('#buf'), under: $('#under'), kbps: $('#kbps'), hint: $('#hint'), note: $('#note'),
+    srv: $('#srv'), tok: $('#tok'), ytp: $('#ytp'), yta: $('#yta'), pathRow: $('#pathRow'),
     modes: [...document.querySelectorAll('[data-mode]')],
   };
   const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
@@ -234,8 +267,8 @@
   };
   const BUSY = new Set(['resolving', 'connecting', 'playing', 'reconnecting']);
   const RING_FULL_MS = 2000; // vòng đầy = 2 giây âm thanh đang đệm
-  const HINT_ERROR = 'Nếu lỗi do không lấy được link: mở video trên trình duyệt máy tính, nhấn F12 → Network, ' +
-                     'lọc “mpd”, rồi dán link .mpd vào ô phía trên.';
+  const HINT_ERROR = 'Nếu không lấy được link: cài hoặc cập nhật yt-dlp (mục Nâng cao bên dưới), hoặc mở video ' +
+                     'trên trình duyệt máy tính, nhấn F12 → Network, lọc “mpd”, rồi dán link .mpd vào ô phía trên.';
 
   const defaultHint = bridge
     ? 'Tắt màn hình vẫn phát. Nếu bị dừng, vào Cài đặt → Pin và đặt ứng dụng ở chế độ Không hạn chế.'
@@ -268,7 +301,7 @@
       else if (s === 'playing') sub = st.title || 'Facebook Live';
       else if (s === 'reconnecting') sub = 'Đang thử lại…';
       else if (s === 'error' || s === 'ended') sub = st.message || '';
-      else sub = st.title || '';
+      else sub = st.message || st.title || ''; // đang tìm / đang kết nối: hiện bước đang làm
       el.sub.textContent = sub;
       el.sub.classList.remove('warn');
     }
@@ -310,7 +343,7 @@
     store.set('url', url);
     if (bridge) bridge.startService('Facebook Live');
     try {
-      await invoke('start', { url, mode });
+      await invoke('start', { url, mode, resolver: resolverArgs() });
       wanted = true;
       poll();
     } catch (e) {
@@ -318,6 +351,14 @@
       if (bridge) bridge.stopService();
     }
   }
+
+  // Tuỳ chọn lấy link (mục Nâng cao), nhớ lại giữa các lần mở app.
+  const resolverArgs = () => ({
+    endpoint: el.srv.value.trim() || null,
+    token: el.tok.value.trim() || null,
+    ytdlpPath: bridge ? null : (el.ytp.value.trim() || null),
+    ytdlpArgs: bridge ? null : (el.yta.value.trim() || null),
+  });
 
   async function stop() {
     wanted = false;
@@ -352,6 +393,11 @@
   }));
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { takeShared(); poll(); } });
 
+  [['srv', 'ytdlpServer'], ['tok', 'ytdlpToken'], ['ytp', 'ytdlpPath'], ['yta', 'ytdlpArgs']].forEach(([id, key]) => {
+    el[id].value = store.get(key, '');
+    el[id].addEventListener('input', () => store.set(key, el[id].value));
+  });
+  if (bridge) el.pathRow.hidden = true; // Android không có yt-dlp tại chỗ
   el.url.value = store.get('url', '');
   setMode(mode);
   render(last);

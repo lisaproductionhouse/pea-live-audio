@@ -26,3 +26,7 @@ cpal = "0.15"
 ringbuf = "0.4"
 # Chỉ khi bật feature `sbr`
 fdk-aac = { version = "0.8", optional = true }
+
+# Diệt cả nhóm tiến trình của yt-dlp khi huỷ / hết giờ (chỉ Unix, gồm Android)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

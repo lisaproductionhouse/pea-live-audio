@@ -78,6 +78,7 @@ print("bước nhảy giữa các mốc liên tiếp (1 = liên tục):", steps)
 
 # 4) độ trễ do ứng dụng thêm vào, đo so với mtime file đoạn
 mpd = open(os.path.join(ddir, "manifest.mpd"), encoding="utf-8").read()
+mpd = mpd.split("</AdaptationSet>")[0]  # chỉ AdaptationSet đầu tiên (audio); MPD có video thì phần sau là video
 ts = int(re.search(r'timescale="(\d+)"', mpd).group(1))
 num = int(re.search(r'startNumber="(\d+)"', mpd).group(1))
 segs, c = [], 0

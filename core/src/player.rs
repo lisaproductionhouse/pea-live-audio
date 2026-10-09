@@ -2,7 +2,7 @@
 
 use crate::dash::{Cursor, Mpd, SegSource};
 use crate::decode::AacDec;
-use crate::extract::{self, Source};
+use crate::extract::{self, Found, ResolverConfig, Source};
 use crate::fmp4::{Event, Fmp4Parser};
 use crate::http::{status_of, Http};
 use crate::output::{Meter, Output, SinkKind, Tuning};
@@ -50,6 +50,8 @@ pub struct PlayerConfig {
     pub latency: LatencyMode,
     /// Nếu có: ghi ra WAV thay vì phát ra loa (dùng để kiểm thử).
     pub wav: Option<PathBuf>,
+    /// Cách lấy manifest từ link Facebook (yt-dlp, máy chủ yt-dlp, bộ cào tích hợp).
+    pub resolver: ResolverConfig,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -258,52 +260,78 @@ fn epoch() -> f64 {
 }
 
 /// Tải + phân tích manifest. Trả thêm độ lệch đồng hồ máy chủ (từ header Date), nếu có.
+/// Nguồn vừa có URL vừa có bản nhúng sẵn: ưu tiên URL (luôn mới), hỏng thì dùng bản nhúng.
 fn load(http: &Http, src: &Source) -> Result<(Mpd, Option<f64>)> {
     if let Some(u) = &src.url {
-        let (body, date) = http.get(u, 4 << 20)?;
-        let off = date
-            .and_then(|d| d.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs_f64() - epoch());
-        Ok((crate::dash::parse(&String::from_utf8_lossy(&body), u)?, off))
-    } else if let Some(x) = &src.xml {
-        Ok((crate::dash::parse(x, &src.base)?, None))
-    } else {
-        bail!("nguồn manifest rỗng")
+        let fetched = http.get(u, 4 << 20).and_then(|(body, date)| {
+            let off = date
+                .and_then(|d| d.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs_f64() - epoch());
+            Ok((crate::dash::parse(&String::from_utf8_lossy(&body), u)?, off))
+        });
+        return match (fetched, &src.xml) {
+            (Ok(r), _) => Ok(r),
+            (Err(e), Some(x)) => {
+                log::warn!("không tải được manifest ({e:#}) → dùng bản nhúng sẵn");
+                Ok((crate::dash::parse(x, &src.base)?, None))
+            }
+            (Err(e), None) => Err(e),
+        };
+    }
+    match &src.xml {
+        Some(x) => Ok((crate::dash::parse(x, &src.base)?, None)),
+        None => bail!("nguồn manifest rỗng"),
     }
 }
 
-fn run(sh: &Shared, cfg: &PlayerConfig) -> Result<()> {
-    let http = Http::new();
-    sh.set(State::Resolving, "Đang tìm luồng âm thanh");
-    let found = extract::resolve(&http, &cfg.url)?;
-    sh.update(|s| s.title = found.title.clone());
-    if sh.stopped() {
-        return Ok(());
-    }
-
+/// Thử lần lượt các manifest ứng viên, lấy cái đầu tiên có luồng audio dùng được.
+fn open_manifest(http: &Http, found: &Found) -> Result<(Source, Mpd, f64)> {
     let mut last_err = None;
-    let mut chosen = None;
     for src in &found.sources {
-        match load(&http, src) {
-            Ok((mpd, off)) => {
-                chosen = Some((src.clone(), mpd, off.unwrap_or(0.0)));
-                break;
-            }
+        match load(http, src) {
+            Ok((mpd, off)) => return Ok((src.clone(), mpd, off.unwrap_or(0.0))),
             Err(e) => {
                 log::warn!("bỏ qua manifest: {e:#}");
                 last_err = Some(e);
             }
         }
     }
-    let (src, mut mpd, mut clock) = chosen
-        .ok_or_else(|| last_err.unwrap_or_else(|| anyhow!("Không có manifest nào dùng được")))?;
+    Err(last_err.unwrap_or_else(|| anyhow!("Không có manifest nào dùng được")))
+}
+
+fn run(sh: &Shared, cfg: &PlayerConfig) -> Result<()> {
+    let base_http = Http::new();
+    sh.set(State::Resolving, "Đang tìm luồng âm thanh");
+
+    // Lấy link → mở manifest. Nếu kết quả lấy từ bộ nhớ đệm mà không dùng được nữa (hết hạn, phiên live
+    // đã đổi) thì quên đi và lấy lại một lần.
+    let mut fresh = false;
+    let (found, http, src, mut mpd, mut clock) = loop {
+        let progress = |m: &str| sh.set(State::Resolving, m);
+        let (found, cached) = extract::resolve(&base_http, &cfg.url, &cfg.resolver, &sh.stop, &progress, fresh)?;
+        if sh.stopped() {
+            return Ok(());
+        }
+        // header do yt-dlp yêu cầu (Facebook: facebookexternalhit/1.1) dùng cho mọi request về sau
+        let http = base_http.with_headers(&found.headers);
+        match open_manifest(&http, &found) {
+            Ok((src, mpd, off)) => break (found, http, src, mpd, off),
+            Err(e) if cached => {
+                log::info!("kết quả đã nhớ không còn dùng được ({e:#}) → lấy lại");
+                extract::forget(&cfg.url);
+                fresh = true;
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    sh.update(|s| s.title = found.title.clone());
 
     let rep = mpd.audio.clone();
     sh.update(|s| {
         s.bitrate_kbps = (rep.bandwidth / 1000) as u32;
         s.codec = rep.codecs.clone();
     });
-    sh.set(State::Connecting, "Đang kết nối");
+    sh.set(State::Connecting, format!("Đã lấy link bằng {}", found.via));
     log::info!(
         "audio: id={} {} kbps {} live={}",
         rep.id,
@@ -514,6 +542,7 @@ mod tests {
                 url: "không phải link".into(),
                 latency: LatencyMode::Ultra,
                 wav: None,
+                resolver: ResolverConfig::default(),
             });
             assert_ne!(p.status().state, State::Idle);
             assert!(p.wait_finished(Duration::from_secs(2)));
@@ -530,6 +559,7 @@ mod tests {
             url: "https://127.0.0.1:1/x.mpd".into(), // cổng đóng → lỗi kết nối nhanh
             latency: LatencyMode::parse("stable"),
             wav: None,
+            resolver: ResolverConfig::default(),
         });
         p.stop();
         assert_eq!(p.status().state, State::Idle);

@@ -3,7 +3,8 @@
 //! Luồng xử lý (một luồng nền duy nhất + callback âm thanh):
 //!
 //! ```text
-//! link FB ─► extract ─► manifest DASH ─► chỉ chọn Representation audio
+//! link FB ─► extract (yt-dlp / máy chủ yt-dlp / bộ cào tích hợp) ─► manifest DASH
+//!                                            ─► chỉ chọn Representation audio
 //!                                            │  (không bao giờ tải video)
 //!      HTTP keep-alive, đọc theo từng chunk ◄┘
 //!            │
@@ -18,5 +19,8 @@ mod fmp4;
 mod http;
 mod output;
 mod player;
+mod ytdlp;
 
+pub use extract::{ResolverConfig, ResolverMode};
 pub use player::{LatencyMode, Player, PlayerConfig, State, Status};
+pub use ytdlp::{split_args, update as update_ytdlp, Local as YtDlpLocal, Remote as YtDlpRemote};

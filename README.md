@@ -3,6 +3,7 @@
 Nghe Facebook Live **chỉ bằng âm thanh**, độ trễ thấp nhất có thể. Viết bằng Rust, giao diện Tauri 2.
 Một codebase cho **Android** (ưu tiên) và **Windows**.
 
+- Lấy link Facebook bằng **yt-dlp** (cộng đồng cập nhật theo Facebook trong vài ngày), có bộ cào tích hợp làm dự phòng.
 - Chỉ tải luồng audio của manifest DASH. Luồng video không bao giờ được yêu cầu, nên băng thông chỉ ~48–128 kbps.
 - Hỗ trợ **AAC-LC và HE-AAC** (luồng Facebook đã thử thực tế dùng HE-AAC, xem mục *HE-AAC* bên dưới).
 - Khi tắt màn hình vẫn phát (Android: dịch vụ foreground + wake lock). Việc này **không thêm độ trễ**, chỉ tốn thêm pin.
@@ -10,11 +11,13 @@ Một codebase cho **Android** (ưu tiên) và **Windows**.
 
 ## Trạng thái kiểm chứng
 
-**Đã kiểm chứng** (Linux, luồng DASH giả lập bằng ffmpeg): toàn bộ đường đi từ manifest đến PCM (DASH → chỉ audio → fMP4 → AAC-LC / HE-AAC → resample → bộ đệm), kể cả bám live, mạng giật, nguồn khựng rồi chạy bù, phiên live kết thúc; HE-AAC v1/v2 thật (mã hóa bằng FDK-AAC, ASC báo hiệu tường minh như Facebook); 22 test tự động, đều đạt ở cả hai cấu hình (mặc định và `--features sbr`); `cargo check` lớp Tauri cùng `tauri.conf.json` và capabilities; giao diện render đúng ở nhiều kích thước và cả hai chế độ sáng/tối.
+**Đã kiểm chứng** (Linux, luồng DASH giả lập bằng ffmpeg): toàn bộ đường đi từ manifest đến PCM (DASH → chỉ audio → fMP4 → AAC-LC / HE-AAC → resample → bộ đệm), kể cả bám live, mạng giật, nguồn khựng rồi chạy bù, phiên live kết thúc; HE-AAC v1/v2 thật (mã hóa bằng FDK-AAC, ASC báo hiệu tường minh như Facebook); 39 test tự động, đều đạt ở cả hai cấu hình (mặc định và `--features sbr`); `cargo check` lớp Tauri cùng `tauri.conf.json` và capabilities; **lấy link bằng yt-dlp thật (2026.08.19)** trên một luồng DASH live có cả video lẫn audio, chạy tại chỗ lẫn qua máy chủ yt-dlp: app chỉ tải audio (0 request video), nghe liền mạch, ổn định +170 ms; giao diện render đúng ở nhiều kích thước và cả hai chế độ sáng/tối.
 
 **Chưa kiểm chứng**, bạn nên thử trước khi tin:
 
-- Lấy link từ **Facebook thật**. Môi trường dựng không truy cập được facebook.com.
+- Lấy link từ **Facebook thật**, kể cả bằng yt-dlp. Môi trường dựng không truy cập được facebook.com; yt-dlp mới được thử trên luồng DASH cục bộ (extractor Generic), không phải extractor Facebook.
+- Các nhánh chỉ dành cho **Windows** trong `ytdlp.rs` (ẩn cửa sổ console, `taskkill`): chưa biên dịch được ở đây.
+- Máy chủ yt-dlp chạy trong **Termux** trên Android.
 - **Phát ra loa thật** (WASAPI trên Windows, Oboe/AAudio trên Android). Môi trường dựng không có thiết bị âm thanh nên chỉ thử bằng ghi WAV; riêng lớp `cpal` chưa chạy trên máy thật.
 - **Build và chạy trên Android** (không có Android SDK/NDK): phần Kotlin, manifest, dịch vụ nền và chia sẻ link.
 
@@ -39,6 +42,48 @@ Số đo trên luồng DASH giả lập cục bộ (ffmpeg, `scripts/e2e-local-d
 | nguồn khựng 5 s rồi chạy bù | về mức ổn định sau khi cắt phần dồn | | |
 
 Các dòng khác là một lần chạy. Mạng thật (4G, Wi-Fi yếu) sẽ khác. Nếu nghe bị ngắt quãng, chuyển *Cân bằng* hoặc *Ổn định*.
+
+## Lấy link từ Facebook: yt-dlp
+
+Facebook đổi cấu trúc trang liên tục nên bộ cào tự viết luôn chạy theo sau. **yt-dlp** được cộng đồng cập nhật theo trong vài ngày, vì vậy ứng dụng dùng nó làm nguồn chính. Chỉ khâu *lấy link* nhờ yt-dlp: nó trả về URL manifest và header cần dùng; còn việc tải riêng luồng audio với độ trễ thấp vẫn do engine của dự án làm (kiểm tra bằng số request: video = 0).
+
+Thứ tự thử (chế độ mặc định `auto`); link `.mpd` dán thẳng thì bỏ qua cả ba bước:
+
+1. **Máy chủ yt-dlp**, nếu bạn đã nhập địa chỉ (dành cho Android, xem dưới).
+2. **yt-dlp tại chỗ**, tự tìm theo thứ tự: ô/tham số “Đường dẫn yt-dlp”, biến `FBAUDIO_YTDLP`, `yt-dlp(.exe)` cạnh file chạy của app, `PATH`, rồi `python -m yt_dlp`.
+3. **Bộ cào tích hợp** (không cần cài gì, dùng làm dự phòng).
+
+| Nền tảng | Cách có yt-dlp |
+|---|---|
+| Windows | `winget install yt-dlp.yt-dlp`, hoặc tải `yt-dlp.exe` rồi đặt cạnh ứng dụng. App tự tìm, không cần cấu hình. |
+| Linux / macOS | `pip install -U yt-dlp` hoặc bản độc lập. |
+| Android | Không có Python nên app **không tự chạy được** yt-dlp: dùng *máy chủ yt-dlp* (bên dưới). |
+
+Hành vi cần biết:
+
+- **Tự cập nhật khi Facebook vừa đổi.** Nếu yt-dlp báo trích xuất hỏng (“Cannot parse data”, “Unable to extract”…), app chạy `yt-dlp -U` rồi thử lại, tối đa một lần mỗi lần mở app. Tắt bằng `FBAUDIO_NO_UPDATE=1` hoặc `--no-update`. Bản cài bằng pip hoặc trình quản lý gói của hệ điều hành (apt, brew…) sẽ từ chối `-U`: hãy cập nhật bằng chính công cụ đó (`pip install -U yt-dlp`, `winget upgrade yt-dlp.yt-dlp`…). Bản sửa lỗi mới nhất thường ra ở kênh nightly: `yt-dlp --update-to nightly`.
+- **Video cần đăng nhập:** truyền cookies qua ô “Tham số thêm cho yt-dlp” (hoặc biến `FBAUDIO_YTDLP_ARGS`, hoặc `--ytdlp-args` ở CLI), ví dụ `--cookies-from-browser firefox`. Lưu ý: dùng tài khoản cá nhân với công cụ tự động có thể bị Facebook hạn chế tài khoản.
+- **Header media:** dùng `http_headers` do yt-dlp báo (với Facebook là `User-Agent: facebookexternalhit/1.1`) cho mọi request audio, vì dùng User-Agent trình duyệt thì CDN Facebook giới hạn tốc độ tải, mà phát trực tiếp mà đoạn về chậm thì sẽ giật.
+- **Nhớ 3 phút** kết quả lấy link, nên dừng rồi phát lại hoặc đổi mức độ trễ không phải chờ yt-dlp thêm vài giây. Nếu link đã nhớ không còn dùng được thì tự lấy lại.
+- Bấm *Dừng* khi đang chờ yt-dlp sẽ diệt luôn cả cây tiến trình của nó.
+
+### Android: máy chủ yt-dlp
+
+Chạy `scripts/ytdlp_helper.py` ở nơi có yt-dlp rồi nhập địa chỉ vào mục *Nâng cao* của app:
+
+```
+# ngay trên điện thoại, bằng Termux (không cần máy khác)
+pkg install python
+pip install -U yt-dlp
+python ytdlp_helper.py                     # địa chỉ trong app: http://127.0.0.1:8787
+
+# hoặc trên máy tính cùng Wi-Fi
+python ytdlp_helper.py --host 0.0.0.0 --token MATKHAU    # địa chỉ: http://<IP máy tính>:8787, nhập cả mã truy cập
+```
+
+Máy chủ này mặc định chỉ lắng nghe `127.0.0.1`, chỉ nhận link Facebook (`--allow-any` để bỏ), đòi mã truy cập nếu đặt `--token`, luôn truyền URL sau `--` (không thể bị hiểu thành tuỳ chọn) và không dùng shell. Đừng mở nó ra Internet. Khi trích xuất hỏng nó cũng tự cập nhật yt-dlp một lần (`--no-update` để tắt). Nếu dùng Termux, nhớ đặt pin của Termux ở chế độ *Không hạn chế* (và chạy `termux-wake-lock`) kẻo Android đóng nó khi tắt màn hình.
+
+Hướng khác (chưa làm): nhúng yt-dlp thẳng vào APK bằng thư viện `youtubedl-android`, để không cần máy chủ nào. Việc này cần thêm phụ thuộc Gradle và lớp cầu nối Kotlin, mà mình không có Android SDK để kiểm chứng.
 
 ## HE-AAC (SBR)
 
@@ -78,7 +123,8 @@ Lưu ý khi bật `sbr`:
 
 ```
 core/      thư viện Rust, không phụ thuộc giao diện
-  extract  link Facebook → manifest DASH (đọc JSON nhúng trong trang, như yt-dlp)
+  extract  link Facebook → manifest DASH: điều phối nhiều nguồn, nhớ kết quả, bộ cào tích hợp dự phòng
+  ytdlp    chạy yt-dlp tại chỗ (huỷ được, tự cập nhật) / gọi máy chủ yt-dlp, đọc JSON của `yt-dlp -J`
   dash     phân tích MPD, chỉ chọn audio, lập lịch đoạn live (timeline / $Number$ / $Time$)
   fmp4     tách AAC frame dạng luồng từ fMP4/CMAF
   decode   AAC-LC và HE-AAC (Symphonia thuần Rust; tuỳ chọn FDK-AAC cho SBR/PS đầy đủ)
@@ -89,7 +135,8 @@ app/
   ui/index.html            giao diện (cảm ứng, tối/sáng theo hệ thống)
   src-tauri/               lớp Tauri mỏng: start / stop / status
   android-overlay/         Kotlin: dịch vụ nền, cầu nối JS, nhận link chia sẻ
-scripts/   kiểm thử đầu-cuối bằng ffmpeg (không cần Facebook); he-fixtures/ tạo lại dữ liệu test HE-AAC
+scripts/   ytdlp_helper.py (máy chủ yt-dlp cho Android); kiểm thử đầu-cuối bằng ffmpeg (không cần Facebook);
+           he-fixtures/ tạo lại dữ liệu test HE-AAC
 ```
 
 ## Thử nhanh bằng dòng lệnh (Windows / Linux / macOS)
@@ -99,6 +146,7 @@ cargo run -p fbaudio-cli --release -- "https://www.facebook.com/<trang>/videos/<
 ```
 
 Tuỳ chọn: `--mode ultra|balanced|stable`, `--wav out.wav` (ghi file thay vì ra loa), `--secs N`, `-v` (log chi tiết).
+Cách lấy link: `--resolver auto|ytdlp|builtin`, `--ytdlp PATH`, `--ytdlp-args "--cookies-from-browser firefox"`, `--ytdlp-server URL`, `--ytdlp-token T`, `--no-update`; `--update-ytdlp` chạy `yt-dlp -U` rồi thoát.
 Cũng nhận link `.mpd` trực tiếp. Trên Linux cần `libasound2-dev` để build.
 
 ## Build cho Windows
@@ -113,6 +161,8 @@ cargo tauri build --bundles nsis     # tạo bộ cài .exe
 ```
 
 Bộ cài nằm ở `app/src-tauri/target/release/bundle/nsis/`. Thu nhỏ cửa sổ vẫn phát.
+
+Cài yt-dlp để lấy link Facebook ổn định: `winget install yt-dlp.yt-dlp` (app tự tìm thấy). Không cài thì app dùng bộ cào tích hợp, dễ gãy hơn.
 
 ## Build cho Android
 
@@ -143,6 +193,7 @@ Muốn phát hành thì build `release` và ký bằng keystore của bạn.
 
 ### Dùng trên Android
 
+- **Lấy link:** Android không chạy được yt-dlp, nên hãy chạy *máy chủ yt-dlp* trong Termux (xem mục *Lấy link từ Facebook*) rồi nhập `http://127.0.0.1:8787` ở *Nâng cao*. Không có máy chủ thì app dùng bộ cào tích hợp.
 - **Cách nhanh nhất:** trong app Facebook mở video live → *Chia sẻ* → *Sao chép liên kết* → mở FB Live Audio → *Dán* → phát. Nếu FB Live Audio có trong bảng chia sẻ thì chọn thẳng, app sẽ tự phát.
 - **Tắt màn hình vẫn phát.** Nếu bị dừng, vào *Cài đặt → Pin → FB Live Audio → Không hạn chế* (Xiaomi, Oppo, Samsung… thường giết ứng dụng nền rất mạnh tay).
 - Muốn dừng: nút *Dừng* trong ứng dụng hoặc trên thông báo. Nếu luồng kết thúc, dịch vụ tự tắt sau vài giây để không giữ pin.
@@ -160,27 +211,30 @@ Cơ chế bám live: khi đệm dư thì phát nhanh hơn tối đa 6% (resample
 ## Kiểm thử
 
 ```
-cargo test -p fbaudio-core                          # 22 test: DASH, fMP4 (AAC-LC và HE-AAC thật) chia mẩu bất kỳ, giải mã, resample, VOD…
+cargo test -p fbaudio-core                          # 39 test: DASH, fMP4 (AAC-LC và HE-AAC thật) chia mẩu bất kỳ, giải mã, resample, VOD, yt-dlp (JSON thật + yt-dlp giả)…
 cargo test -p fbaudio-core --features sbr           # cùng bộ test với bộ giải mã FDK-AAC
 bash scripts/e2e-local-dash.sh ultra 2                   # ffmpeg phát DASH live giả lập → fbaudio → WAV → đo độ trễ
 JITTER_MS=250 bash scripts/e2e-local-dash.sh ultra 2     # giả lập mạng giật
 STALL=1       bash scripts/e2e-local-dash.sh ultra 2     # nguồn khựng 5 s rồi chạy bù
+bash scripts/e2e-ytdlp.sh                           # lấy link bằng yt-dlp THẬT (cần yt-dlp), đếm request video = 0
+VIA=server bash scripts/e2e-ytdlp.sh                # như trên nhưng qua máy chủ yt-dlp
 ```
 
-Cần `ffmpeg`, `python3`, `numpy`.
+Cần `ffmpeg`, `python3`, `numpy` (và `yt-dlp` cho `e2e-ytdlp.sh`).
 
 ## Hạn chế và xử lý sự cố
 
-**Phần dễ gãy nhất là lấy link từ Facebook.** Facebook không có API công khai cho người xem; ứng dụng đọc JSON mà trang video nhúng sẵn (như yt-dlp) và Facebook đổi cấu trúc này thường xuyên. Môi trường mình dựng không truy cập được facebook.com, nên bước này **chưa được thử với Facebook thật**, chỉ có test trên dữ liệu mô phỏng. Nếu báo *"Không tìm thấy luồng DASH"*:
+**Phần dễ gãy nhất là lấy link từ Facebook**, và đó là lý do ứng dụng dùng yt-dlp. Bộ cào tích hợp vẫn còn làm dự phòng, đã chỉnh theo cấu trúc mà extractor Facebook của yt-dlp 2026.08 đang đọc (khoá `manifest_url` trong `dash_manifest_urls`, ghép với `manifest_xml`), nhưng cũng chưa được thử với Facebook thật. Nếu báo *“Không lấy được luồng âm thanh”*:
 
-1. Mở video live trên trình duyệt máy tính → F12 → tab *Network* → lọc `mpd`.
-2. Sao chép URL `.mpd` và **dán thẳng vào ô nhập** của ứng dụng. Phần còn lại (DASH → audio) không phụ thuộc Facebook.
+1. Cập nhật yt-dlp (`yt-dlp -U`, hoặc `yt-dlp --update-to nightly`) rồi thử lại.
+2. Video cần đăng nhập thì thêm cookies (xem mục yt-dlp ở trên).
+3. Cách chắc chắn nhất: mở video live trên trình duyệt máy tính → F12 → tab *Network* → lọc `mpd`, sao chép URL `.mpd` và **dán thẳng vào ô nhập** của ứng dụng. Phần còn lại (DASH → audio) không phụ thuộc Facebook.
 
 Các giới hạn khác:
 
-- Chỉ phát được video **công khai**, không cần đăng nhập. Video riêng tư, nhóm kín: không hỗ trợ.
+- Video **công khai** chạy được ngay. Video cần đăng nhập chỉ phát được khi truyền cookies cho yt-dlp (xem trên); video riêng tư, nhóm kín: không bảo đảm.
+- Chỉ DASH. Nếu yt-dlp chỉ trả về HLS hoặc định dạng ghép sẵn hình + tiếng, app báo rõ chứ không phát được.
 - Codec: AAC-LC và HE-AAC (v1, v2). Profile khác (ví dụ ER AAC) sẽ báo lỗi rõ ràng.
-- Chỉ DASH, chưa có HLS.
 - Nội dung đã kết thúc (bản phát lại, link `.mpd` tĩnh) phát đủ từ đầu, không đuổi live. Khi phiên live đang nghe kết thúc, app tự dừng sau vài giây và báo *Phiên live đã kết thúc*.
 - Phần Android/Tauri **chưa được build trong môi trường dựng** (không có Android SDK/NDK). Đã kiểm tra bằng `cargo check` trên Linux cho lớp Tauri và cấu hình; phần Kotlin viết theo API của Tauri 2 nên có thể cần chỉnh nhỏ theo phiên bản bạn dùng, ví dụ `onWebViewCreate` yêu cầu bản `tauri` mới.
 - Vuốt đóng ứng dụng khỏi danh sách gần đây có thể dừng phát (chưa kiểm chứng trên máy thật). Cứ tắt màn hình hoặc chuyển sang app khác là được.

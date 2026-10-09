@@ -295,6 +295,7 @@ dependencies = [
  "cpal",
  "fdk-aac",
  "httpdate",
+ "libc",
  "log",
  "ringbuf",
  "roxmltree",
